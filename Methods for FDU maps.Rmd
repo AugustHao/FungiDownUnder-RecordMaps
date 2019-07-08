@@ -1,0 +1,431 @@
+---
+title: "The making of FDU interactive record maps"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This document details the process, and decisions made, behind the making of interactive record maps for Fungimap target species. The aim of this document is to make transparent the exact methods and data used for producing these maps, and to explain why certain decisions are made for filtering and correcting data. 
+
+### Data sources  
+
+
+We gathered records from the Fungimap database, as well as the Atlas of Living Australia (ALA <https://www.ala.org.au/>), the Global Biodiversity Information Facility (GBIF <https://www.gbif.org>), iNaturalist <https://www.inaturalist.org> and the MycoPortal <http://mycoportal.org/portal/index.php> databases. ALA, GBIF, and iNaturalist are non-fungi-specific databases, so we searched for all records that (1) belong to the kingdom of Fungi, (2) are found in Australia, and (3) are not environmental DNA samples or fossil specimen. In MycoPortal, we searched for all records that are (1) in Australia, (2) are not environmental DNA samples or fossil specimen, and (3) are not from the ALA, since MycoPortal also absorbs data from the ALA. With Fungimap database, we used all records.  
+
+In the current version, all data were downloaded as csv files on 14/05/2019 from their respective databases. We have set up a data processing and compilation pipeline below, so that with future downloads, the aggregated database can be updated.  
+
+Here, we use a **small fraction** of the original data to demonstrate how we process these data --- this means that results displayed here will be different from those in the full analysis.  
+
+### Data loading
+
+```{r cache=TRUE}
+#set global options for reading csv files
+options(fill=TRUE, stringsAsFactors = FALSE, header = TRUE, fileEncoding="UTF-8", na.strings = c(""," ","NA"), row.names = NULL)
+#load all data and uppercase all colnames 
+
+GBIF <- read.csv("Data/GBIF.csv")
+colnames(GBIF) <- toupper(colnames(GBIF))
+####important note for GBIF: open downloaded GBIF data in excel and save as CSV manually, because R recognises original GBIF format as tab-delimited, which does not work well with our NA string argument (teating tab as NA)
+ALA <- read.csv("Data/ALA.csv")
+colnames(ALA) <- toupper(colnames(ALA))
+MycoPortal <- read.table("Data/MycoPortal.csv", sep= ",", fill = TRUE, header = TRUE)
+colnames(MycoPortal) <- toupper(colnames(MycoPortal))
+iNaturalist <- read.csv("Data/iNaturalist.csv")
+colnames(iNaturalist) <- toupper(colnames(iNaturalist))
+Fungimap <- read.csv("Data/fungimap.csv")
+colnames(Fungimap) <- toupper(colnames(Fungimap))
+Fungimap.GnR <- read.csv("Data/fungimap-GatesRatkowsky.csv")
+colnames(Fungimap.GnR) <- toupper(colnames(Fungimap.GnR))
+```
+
+### Data filtering
+
+For each dataset, we filter them based on a number of criteria  
+
+```{r}
+##############we will filter through the data one criterion at a time:#######################
+#  ONE ----- keeping only records identified to species level
+##some datasets contain records at higher taxonomic level, we will remove them. This is not necessary, because such data will be excluded later when matching to Latin binomials of target species. However, as we deal with large dataset, have this preliminary exclusion of unnecessary data can speed up later processing.
+#ALA:
+table(ALA$TAXON.RANK)
+#as seen here, ALA data contains multiple taxonomic ranks, however, we also know that some species gets mis-coded as genus when older synonyms are used. For this reason, we are not filtering ALA data based on species yet.
+#GBIF:
+table(GBIF$TAXONRANK)
+#keep species level and below
+GBIF.filtered <- GBIF[GBIF$TAXONRANK %in% c("SPECIES","SUBSPECIES","VARIETY","FORM"),]
+#MycoPortal -- we use SPECIFICEPITHET column to sort species 
+MycoPortal.filtered <- MycoPortal[MycoPortal$SPECIFICEPITHET != "",]
+###inaturalist and fungimap are all species level, so we will not be filtering them
+
+# TWO ---- we will remove any records without long/lat information
+
+#for ALA, all records missing coordinates are missing both lat and long, but we will remove any without either long or lat, to be future proof
+ALA.filtered <- ALA[!(is.na(ALA$LONGITUDE) | is.na(ALA$LATITUDE)),]
+
+#for GBIF, we first coerce all lat and long into numbers (so all non-numerical long/lat values will be coerced into NAs), then we remove NAs.
+
+GBIF.filtered$DECIMALLATITUDE <- as.numeric(GBIF.filtered$DECIMALLATITUDE)
+GBIF.filtered$DECIMALLONGITUDE <- as.numeric(GBIF.filtered$DECIMALLONGITUDE)
+GBIF.filtered <- GBIF.filtered[!(is.na(GBIF.filtered$DECIMALLONGITUDE) | is.na(GBIF.filtered$DECIMALLATITUDE)),]
+
+#mycoportal we do the same
+MycoPortal.filtered$DECIMALLATITUDE <- as.numeric(MycoPortal.filtered$DECIMALLATITUDE)
+MycoPortal.filtered$DECIMALLONGITUDE <- as.numeric(MycoPortal.filtered$DECIMALLONGITUDE)
+MycoPortal.filtered <- MycoPortal.filtered[!(is.na(MycoPortal.filtered$DECIMALLONGITUDE) | is.na(MycoPortal.filtered$DECIMALLATITUDE)),]
+
+#iNaturalist does not have NA, but we do this too to be future proof
+iNaturalist.filtered <- iNaturalist[!(is.na(iNaturalist$LONGITUDE) | is.na(iNaturalist$LATITUDE)),]
+#also we remove non-research grad iNat data
+iNaturalist.filtered <- iNaturalist[iNaturalist$QUALITY_GRADE == "research",]
+
+
+#fungimap, we remove NAs
+Fungimap.filtered <- Fungimap[!(is.na(Fungimap$LONGDET) | is.na(Fungimap$LATDEC)),]
+#fungimapGNR has no NA either, but we also incude the code to be future-proof
+Fungimap.GnR.filtered <- Fungimap.GnR[!(is.na(Fungimap.GnR$LONGDET) | is.na(Fungimap.GnR$LATDEC)),]
+
+```
+
+### Pre-processing before combining data
+
+Before we can merge the datasets, we need to make sure they contain the same columns of the same information, so some pre-processing is needed. Unlike the previous stage, here we are not throwing away data, but modifying/adding content.
+
+```{r}
+#######################pre-process before combine data#################
+#define the type of information we want to retain from different datasets
+col.selected <- c("SOURCE", "ID", "SPECIES", "STATE", "LOCALITY DESCRIPTION", "POSITIONAL ACCURACY", "DATE", "LONGITUDE", "LATITUDE", "BASIS OF RECORD", "IDENTIFIER ID", "SUBSTRATE", "HABITAT")
+#Fungimap datasets do not have a data column yet (date info stored in separate comlumns of DMY), so we add a date column to fungimap
+Fungimap.filtered$EVENTDATE <- paste(Fungimap.filtered$YEAR,Fungimap.filtered$MONTH, Fungimap.filtered$DAY, sep = "-")
+Fungimap.GnR.filtered$EVENTDATE <- paste(Fungimap.GnR.filtered$YEAR,Fungimap.GnR.filtered$MONTH, Fungimap.GnR.filtered$DAY, sep = "-")
+#also replace fungimap species id with species name
+funginame.lookup <- read.csv("Data/funginames.csv")
+Fungimap.filtered$SPECIES <- funginame.lookup$name[match(Fungimap.filtered$SP_NO,funginame.lookup$id)]
+Fungimap.GnR.filtered$SPECIES <- funginame.lookup$name[match(Fungimap.GnR.filtered$SP_NO,funginame.lookup$id)]
+#replace PRCODE values in fungimap data with metres
+#remember 1= within 50m, 2= within 1km, 3= within 10km, 4= within 25km, 5= greater than 25km, 6= indefinable within Aus.
+unique(Fungimap.filtered$PRCODE)
+Fungimap.filtered$PRCODE[Fungimap.filtered$PRCODE == "1"] <- 50
+Fungimap.filtered$PRCODE[Fungimap.filtered$PRCODE == "2"] <- 1000
+Fungimap.filtered$PRCODE[Fungimap.filtered$PRCODE %in% c("2-3","3")] <- 10000
+Fungimap.filtered$PRCODE[Fungimap.filtered$PRCODE == "4"] <- 25000
+Fungimap.filtered$PRCODE[Fungimap.filtered$PRCODE == "5"] <- 50000 #use this to represent larger than 25km
+Fungimap.filtered$PRCODE[Fungimap.filtered$PRCODE %in% c("","6","#N/A")] <- NA
+unique(Fungimap.GnR.filtered$PRCODE)
+Fungimap.GnR.filtered$PRCODE[Fungimap.GnR.filtered$PRCODE == "1"] <- 50
+Fungimap.GnR.filtered$PRCODE[Fungimap.GnR.filtered$PRCODE == "2"] <- 1000
+Fungimap.GnR.filtered$PRCODE[Fungimap.GnR.filtered$PRCODE %in% c("2-3","3")] <- 10000
+Fungimap.GnR.filtered$PRCODE[Fungimap.GnR.filtered$PRCODE == ""] <- NA
+#add a source column to all datasets
+ALA.filtered$SOURCE <- rep("ALA",nrow(ALA.filtered))
+GBIF.filtered$SOURCE <- rep("GBIF",nrow(GBIF.filtered))
+MycoPortal.filtered$SOURCE <- rep("MycoPortal",nrow(MycoPortal.filtered))
+iNaturalist.filtered$SOURCE <- rep("iNat",nrow(iNaturalist.filtered))
+Fungimap.filtered$SOURCE <- rep("Fungimap",nrow(Fungimap.filtered))
+Fungimap.GnR.filtered$SOURCE <- rep("Fungimap",nrow(Fungimap.GnR.filtered))
+```
+
+### Combining data
+
+```{r}
+####remember Fungimap and MycoPortal go first because they have substrate and habitat info
+AAF.ver1 <- data.frame("SOURCE" = c(Fungimap.filtered$SOURCE,
+                                    Fungimap.GnR.filtered$SOURCE,
+                                    MycoPortal.filtered$SOURCE,
+                                    ALA.filtered$SOURCE,
+                                    GBIF.filtered$SOURCE,
+                                    iNaturalist.filtered$SOURCE), 
+                       "ORIGINAL.ID" = c(Fungimap.filtered$ID,
+                                Fungimap.GnR.filtered$ID,
+                                MycoPortal.filtered$ID,
+                                ALA.filtered$RECORD.ID,
+                                GBIF.filtered$GBIFID,
+                                iNaturalist.filtered$ID),
+                       "SPECIES" = c(Fungimap.filtered$SPECIES,
+                                     Fungimap.GnR.filtered$SPECIES,
+                                     MycoPortal.filtered$SCIENTIFICNAME,
+                                     ALA.filtered$SPECIES,
+                                     GBIF.filtered$SPECIES,
+                                     iNaturalist.filtered$SCIENTIFIC_NAME),
+                       "STATE" = c(Fungimap.filtered$STATE,
+                                   Fungimap.GnR.filtered$STATE,
+                                   MycoPortal.filtered$STATEPROVINCE,
+                                   ALA.filtered$STATE...PARSED,
+                                   GBIF.filtered$COUNTRYCODE,
+                                   rep("AUSTRALIA",
+                                       nrow(iNaturalist.filtered))),
+                       "LOCALITY DESCRIPTION" = c(Fungimap.filtered$LOCALITY,
+                                                  Fungimap.GnR.filtered$LOCALITY,
+                                                  MycoPortal.filtered$LOCALITY,
+                                                  ALA.filtered$LOCALITY,
+                                                  GBIF.filtered$LOCALITY,
+                                                  iNaturalist.filtered$PLACE_GUESS),
+                       "POSITIONAL ACCURACY" = c(Fungimap.filtered$PRCODE,
+                                                 Fungimap.GnR.filtered$PRCODE,
+                                                 MycoPortal.filtered$COORDINATEUNCERTAINTYINMETERS,
+                                                 ALA.filtered$COORDINATE.UNCERTAINTY.IN.METRES,
+                                                 GBIF.filtered$COORDINATEUNCERTAINTYINMETERS,
+                                                 iNaturalist.filtered$POSITIONAL_ACCURACY),
+                       "DATE" = c(Fungimap.filtered$EVENTDATE,
+                                  Fungimap.GnR.filtered$EVENTDATE,
+                                  MycoPortal.filtered$EVENTDATE,
+                                  ALA.filtered$EVENT.DATE...PARSED,
+                                  GBIF.filtered$EVENTDATE,
+                                  iNaturalist.filtered$OBSERVED_ON),
+                       "LONGITUDE" = c(Fungimap.filtered$LONGDET,
+                                       Fungimap.GnR.filtered$LONGDET,
+                                       MycoPortal.filtered$DECIMALLONGITUDE,
+                                       ALA.filtered$LONGITUDE,
+                                       GBIF.filtered$DECIMALLONGITUDE,
+                                       iNaturalist.filtered$LONGITUDE),
+                           "LATITUDE" = c(Fungimap.filtered$LATDEC,
+                                          Fungimap.GnR.filtered$LATDEC, 
+                                          MycoPortal.filtered$DECIMALLATITUDE,
+                                          ALA.filtered$LATITUDE,
+                                          GBIF.filtered$DECIMALLATITUDE,
+                                          iNaturalist.filtered$LATITUDE),
+                       "BASIS OF RECORD" = c(rep("Human observation",
+                                                 nrow(Fungimap.filtered)),
+                                             rep("Human observation",
+                                                 nrow(Fungimap.GnR.filtered)),
+                                             MycoPortal.filtered$BASISOFRECORD,
+                                             ALA.filtered$BASIS.OF.RECORD,
+                                             GBIF.filtered$BASISOFRECORD,
+                                             rep("Human observation",
+                                                 nrow(iNaturalist.filtered))
+                                             ),
+                        "IDENTIFIER ID" = c(Fungimap.filtered$RECORDED_BY,
+                                            Fungimap.GnR.filtered$RECORDED_BY, 
+                                            MycoPortal.filtered$RECORDEDBY, 
+                                            ALA.filtered$COLLECTOR,
+                                            GBIF.filtered$RECORDEDBY,
+                                            iNaturalist.filtered$USER_ID),
+                           "SUBSTRATE" = c(Fungimap.filtered$SUBSTRATE, 
+                                           Fungimap.GnR.filtered$SUBSTRATE, 
+                                           MycoPortal.filtered$SUBSTRATE, 
+                                           rep("NOT REPORTED",
+                                               nrow(ALA.filtered)), 
+                                           rep("NOT REPORTED",
+                                               nrow(GBIF.filtered)), 
+                                           rep("NOT REPORTED",
+                                               nrow(iNaturalist.filtered))
+                                           ), 
+                           "HABITAT" = c(Fungimap.filtered$HABITAT, 
+                                         Fungimap.GnR.filtered$HABITAT, 
+                                         MycoPortal.filtered$HABITAT, 
+                                         rep("NOT REPORTED",
+                                             nrow(ALA.filtered)), 
+                                         rep("NOT REPORTED",
+                                             nrow(GBIF.filtered)),
+                                         rep("NOT REPORTED",
+                                             nrow(iNaturalist.filtered))
+                                         ), 
+                       stringsAsFactors = FALSE
+)
+#add a temporary column for ALA original name (only ALA has this column)
+AAF.ver1$ALA.ORIGINAL.SPECIES <- c(rep(NA,length(c(Fungimap.filtered$SOURCE,
+                                                 Fungimap.GnR.filtered$SOURCE,
+                                                 MycoPortal.filtered$SOURCE))),
+                                   ALA.filtered$SCIENTIFIC.NAME...ORIGINAL,
+                                   rep(NA,(nrow(GBIF.filtered) + nrow(iNaturalist.filtered))))
+####good, remove WIP files
+rm(list = ls()[-which(ls() == "AAF.ver1")]) #this line is irrelevant here, but useful for saving memory when working with the real dataset
+gc()
+```
+
+Let's have a look what the data looks like
+
+```{r echo=FALSE}
+plot(AAF.ver1$LONGITUDE,AAF.ver1$LATITUDE)
+```
+
+Some obvious problems stand out --- there is a clump of records in the northern hemisphere that appears to have flipped latitudes, and there are a number of records outside Australia. We'll fix them.
+
+```{r}
+#flip lat
+AAF.ver1$LATITUDE <- ifelse(AAF.ver1$LATITUDE > 0, -AAF.ver1$LATITUDE,AAF.ver1$LATITUDE)
+#chuck out anything with impossible long or lat
+AAF.ver1 <- AAF.ver1[AAF.ver1$LONGITUDE < 180 & AAF.ver1$LONGITUDE > -180, ]
+AAF.ver1 <- AAF.ver1[AAF.ver1$LATITUDE < 0 & AAF.ver1$LATITUDE > -90, ]
+
+#use a blank AUstralia raster to remove out-of-Australia points
+library(raster)
+AUS.raster <- raster("Data/ONE GRID TO RULE THEM ALL/AUS_GDA94AA_GRID_MASK_1000.tif")
+
+#convert coordinate to GDA94
+geo.coord <- SpatialPoints(coords = AAF.ver1[,c("LONGITUDE","LATITUDE")],proj4string = CRS("+init=epsg:4326"))
+albers.coord <- spTransform(geo.coord,crs(AUS.raster))
+#decimal meters are pointless, round them to integers
+#first change back to df
+albers.coord <- as.matrix(as.data.frame(albers.coord))
+albers.coord <- trunc(albers.coord,0)
+albers.coord <- apply(albers.coord,2,as.integer)
+#get back to df
+albers.coord <- as.data.frame(albers.coord)
+names(albers.coord) <- c("ALBERS X", "ALBERS Y")
+#done
+AAF.ver1  <- cbind(AAF.ver1,albers.coord)
+#use the raster to get rid of out of australia points
+AAF.ver1 <-  AAF.ver1[complete.cases(extract(AUS.raster,AAF.ver1[,15:16])),]
+```
+
+Check what the data looks like now
+
+```{r echo=FALSE}
+plot(AUS.raster,
+     xaxt = "n", yaxt = "n",
+     bty = "n",
+     xlab = "", ylab = "", legend = F)
+points(AAF.ver1[,15:16])
+```
+
+Looking good, at this stage we can save our final product, so that we can load it directly for further uses.  
+
+The codes below saves our final dataset as both a csv file and a RData file, they are not executed here, but I used them in my original workflow --- this is not a necessity, but you could do the same if you want to replicate exactly my procedures.
+
+
+```{r eval=FALSE}
+save(AAF.ver1, file = "Output/AAFver1.RData")
+write.csv(AAF.ver1,file = "Output/AAFver1.csv", row.names = FALSE, fileEncoding="UTF-8")
+```
+
+### Filtering Fungimap target species  
+
+At this stage, we have collated records from all sources, for all species (and possibly other taxonomic units). This could be useful for exploring other questions (e.g. community composition or species turnover), but for now we select only Fungimap target species for making maps.  
+
+Run the folloiwng line to re-load species data into your R environment, if you have saved them and started a new session, like I originally did.  
+```{r eval=FALSE}
+#load species data
+load("Output/AAFver1.RData")
+```
+
+
+Execute the following codes for subsetting all data to all Fungimap species.  
+
+```{r}
+#load the target species list
+targetspecieslist <- read.csv("Data/synonyms.csv", stringsAsFactors = FALSE)
+#check the structure of it
+head(targetspecieslist)
+#you will see this table has two columns - one denoting the "true" species name (DATABASE.NAME) we are using in our final dataframe, and one denoting all associated synonyms (ALL.NAMES)
+
+#remove any possible duplicate true-synonym pairs - there should not be any but we do this just to be sure
+targetspecieslist <- targetspecieslist[!duplicated(targetspecieslist$ALL.NAMES),]
+
+
+#subset to only target species
+AAF.target <- AAF.ver1[AAF.ver1$SPECIES %in% targetspecieslist$ALL.NAMES|AAF.ver1$ALA.ORIGINAL.SPECIES %in% targetspecieslist$ALL.NAMES,]
+#okay, remove non-target dataframe - we do not need it anymore
+rm(AAF.ver1)
+
+#these lines of codes replaces synonyms with "true" species names. Remember that we kept a 'original name' column for ALA data, so that we can bypass ALA's built-in synonym algorithm, if necessary.
+AAF.target$SPECIES <- ifelse(is.na(AAF.target$ALA.ORIGINAL.SPECIES),
+    targetspecieslist$DATABASE.NAME[match(AAF.target$SPECIES,targetspecieslist$ALL.NAMES)],
+    ifelse(is.na(targetspecieslist$DATABASE.NAME[match(AAF.target$ALA.ORIGINAL.SPECIES,targetspecieslist$ALL.NAMES)]),targetspecieslist$DATABASE.NAME[match(AAF.target$SPECIES,targetspecieslist$ALL.NAMES)],targetspecieslist$DATABASE.NAME[match(AAF.target$ALA.ORIGINAL.SPECIES,targetspecieslist$ALL.NAMES)]))
+```
+
+
+At this point, we can run the following to check how many species have records, and which species are missing. Here we are not doing this because we are using a much smaller example set of records, so a lot more species are missing.  
+
+```{r eval=FALSE}
+#check how many species in general
+length(unique(AAF.target$SPECIES))
+#238 - looks right
+#remove the column for ALA orignal names - this is no longer needed
+AAF.target <- AAF.target[,-14]
+#print names of no record species - these are the FDU target species with no records at all presently
+unique(targetspecieslist$DATABASE.NAME)[!(unique(targetspecieslist$DATABASE.NAME) %in% unique(AAF.target$SPECIES))]
+```
+### Flag duplicates
+
+So far, we have kept all duplicate records, so that we have information about which databases contain those duplicates. However, for mapping those records, it is more reasonable to keep merge all duplicates into one copy. Here we do this by adding a column to annotate all possible duplicates for each record, then remove those duplicates from the dataframe.  
+
+Run the following line to reproduce all what we did prior to this point, if you are working in a new session.  
+
+```{r eval= FALSE}
+#we try to flag duplicate datasets
+#load species data
+source("Scripts/FUNGIMAP target set.R")
+```
+
+
+First, we find all records with the same species name, and same coordinates (we are using Australian Albers GDA94 coordinates here because R processes integer coordinates faster, but long/lat works too). This means  situations in which the same species is recorded in the same location at different times will also be treated as duplicates. This does not make sense for some applications (e.g. species accumulation curve over time), but for mapping this is okay.  
+```{r}
+AAF.target.no.dup <- AAF.target[!duplicated(AAF.target[,c("SPECIES","ALBERS X", "ALBERS Y")]),]
+```
+
+Run the following to add a column to annotate duplicates for each unique combination of species and coordinates. This code uses a for loop through the entire dataset, which is slow (and likely not the most efficient way to do this). I may improve this in the future, but for now you can use the same code to annotate duplicates. On my computer, this takes ~9 hours for the full dataset (but it will be a lot faster for this example dataset used here).  
+
+```{r}
+#use system.time to time how long the operation takes
+system.time(
+    for (i in 1:nrow(AAF.target.no.dup)) {
+        annotation <- merge(AAF.target, AAF.target.no.dup[i,c("SPECIES","ALBERS X", "ALBERS Y")], by.x = c("SPECIES","ALBERS X", "ALBERS Y"), all.x = FALSE, all.y = TRUE)
+        annotation <- paste(apply(annotation[,4:5], 1, paste, collapse=" "), collapse=" ")
+        AAF.target.no.dup$DUPLICATION.ANNOTATION[i] <- annotation
+    }
+)
+#check what the data looks like
+head(AAF.target.no.dup, n = 5)
+#we see that there is now an extra column named "DUPLICATION.ANNOTATION", which details the SOURCE and ORIGINAL.ID in which the record is found. For the rows we are looking at here, there are no duplicates, thus all the "DUPLICATION.ANNOTATION" information only points to single records.
+```
+
+Use the following to save the de-duplicated copy of the data, here we are not running them. 
+
+```{r eval = FALSE}
+###save this
+save(AAF.target.no.dup,file = "Output/AAFdupannotated.RData")
+write.csv(AAF.target.no.dup, file = "Output/AAFdupannotated.csv", row.names = FALSE, fileEncoding="UTF-8")
+```
+
+
+### Map-making
+
+Now we are finally ready to make maps.
+
+```{r}
+#load the package mapview for making maps, and viridis for colour scheme
+library(mapview); library(viridis)
+```
+
+Again, use the following to load data, if it is not in your environment yet.  
+```{r eval=FALSE}
+#load species data
+load("Output/AAFdupannotated.RData")
+```
+
+We first turn basis of records into a facet-able factor.  
+```{r}
+#check what documentation there are
+unique(AAF.target.no.dup$BASIS.OF.RECORD)
+#collapse into human observation, preserved specimen, or else
+AAF.target.no.dup$BASIS.OF.RECORD[AAF.target.no.dup$BASIS.OF.RECORD %in% c("PreservedSpecimen","Exsiccati","PRESERVED_SPECIMEN","Preserved Specimen")] <- "Preserved Specimen"
+AAF.target.no.dup$BASIS.OF.RECORD[AAF.target.no.dup$BASIS.OF.RECORD %in% c("HumanObservation","HUMAN_OBSERVATION","Observation","Human Observation","Human observation")] <- "Human Observation"
+AAF.target.no.dup$BASIS.OF.RECORD[!(AAF.target.no.dup$BASIS.OF.RECORD %in% c("Human Observation","Preserved Specimen"))] <- "Others"
+unique(AAF.target.no.dup$BASIS.OF.RECORD)
+#good
+#turn into a factor
+AAF.target.no.dup$BASIS.OF.RECORD <- as.factor(AAF.target.no.dup$BASIS.OF.RECORD)
+```
+
+Now we can execute the following lines to make maps for each species, and save them locally. Here we are not running these codes, please refer to the actual maps **insert link here** for the final products.  
+
+```{r eval=FALSE}
+####interactive maps through the mapview package
+for (sp in 1:length(unique(AAF.target.no.dup$SPECIES))) {
+    sp.sf <- st_as_sf(AAF.target.no.dup[AAF.target.no.dup$SPECIES == unique(AAF.target.no.dup$SPECIES)[sp],], coords = (14:15), crs = crs(AUS.raster))
+    mapshot(mapview(sp.sf, layer.name = unique(AAF.target.no.dup$SPECIES)[sp], homebutton = F, zcol = "BASIS.OF.RECORD", colour = viridis(3)), url = paste0(unique(AAF.target.no.dup$SPECIES)[sp],".html"))
+    
+}
+
+```
+
+### The End  
+
+
+
+
+
+
